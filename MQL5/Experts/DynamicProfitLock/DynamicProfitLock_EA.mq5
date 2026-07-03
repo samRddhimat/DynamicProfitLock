@@ -12,40 +12,72 @@
 //|   $1000+        : lock in 90% of profit                          |
 //|                                                                   |
 //| Design:                                                           |
-//| - Attaches to ANY chart (symbol doesn't matter — it scans ALL     |
+//| - Attaches to ANY chart (symbol doesn't matter - it scans ALL     |
 //|   open positions across the account, not just the chart symbol).  |
-//| - Evaluates every tick. In practice SL rarely needs updating      |
-//|   more than once per few seconds, but tick-level evaluation       |
-//|   ensures the fastest possible response when profit jumps.        |
+//| - Evaluates every N ticks (configurable).                         |
 //| - Only modifies SL when the new computed value is a genuine       |
 //|   improvement over the current one (never-loosen principle).      |
 //| - Does NOT touch TP. Does NOT close positions. SL management only.|
-//| - Completely independent of InstitutionalEA — different magic      |
+//| - Completely independent of InstitutionalEA - different magic      |
 //|   filter (0 vs InpMagicNumber), different chart, no shared state. |
 //|                                                                   |
 //| Parameters:                                                        |
-//|   InpMinProfit      : minimum unrealized profit ($) before the    |
-//|                       EA starts adjusting SL. Prevents noise-     |
-//|                       driven SL moves on barely-profitable trades. |
-//|   InpCheckEveryNTicks: how often to re-evaluate (1 = every tick,  |
-//|                        10 = every 10th tick). Use higher values   |
-//|                        on fast symbols to reduce CPU load.        |
-//|   InpLogAdjustments : print to Experts log when SL is changed.   |
+//|   InpMinProfit       : minimum unrealized profit ($) before SL    |
+//|                        is adjusted.                               |
+//|   InpCheckEveryNTicks: how often to re-evaluate (1=every tick).   |
+//|   InpLogAdjustments  : print to Experts log when SL is changed.   |
+//|   InpSymbolFilter    : comma-separated list of symbols to SKIP.   |
+//|                        "" = manage ALL symbols.                   |
+//|                        "XAUUSD" = skip XAUUSD only.              |
+//|                        "XAUUSD,USDJPY" = skip both.              |
 //+------------------------------------------------------------------+
 #property copyright "DynamicProfitLock EA"
-#property version   "1.00"
+#property version   "1.01"
 #property strict
 
 #include <Trade/Trade.mqh>
 
 //--- inputs
-input double InpMinProfit        = 1.0;   // Minimum profit ($) before SL is adjusted
-input int    InpCheckEveryNTicks = 5;     // Evaluate every N ticks (1=every tick)
-input bool   InpLogAdjustments   = true;  // Log SL changes to Experts tab
+input double InpMinProfit        = 1.0;    // Minimum profit ($) before SL is adjusted
+input int    InpCheckEveryNTicks = 5;      // Evaluate every N ticks (1=every tick)
+input bool   InpLogAdjustments   = true;   // Log SL changes to Experts tab
+input string InpSymbolFilter     = "";     // Symbols to SKIP (comma-separated, e.g. "XAUUSD,USDJPY")
 
 //--- state
-CTrade g_trade;
-int    g_tickCount = 0;
+CTrade  g_trade;
+int     g_tickCount = 0;
+string  g_skipSymbols[];  // parsed from InpSymbolFilter
+
+//+------------------------------------------------------------------+
+//| Parse InpSymbolFilter into the g_skipSymbols array               |
+//+------------------------------------------------------------------+
+void ParseSymbolFilter()
+{
+   ArrayResize(g_skipSymbols, 0);
+   if(StringLen(InpSymbolFilter) == 0) return;
+
+   string parts[];
+   int count = StringSplit(InpSymbolFilter, ',', parts);
+   ArrayResize(g_skipSymbols, count);
+   for(int i = 0; i < count; i++)
+   {
+      g_skipSymbols[i] = parts[i];
+      // trim whitespace
+      StringTrimLeft(g_skipSymbols[i]);
+      StringTrimRight(g_skipSymbols[i]);
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Return true if this symbol should be skipped                      |
+//+------------------------------------------------------------------+
+bool IsSkipped(const string symbol)
+{
+   const int n = ArraySize(g_skipSymbols);
+   for(int i = 0; i < n; i++)
+      if(g_skipSymbols[i] == symbol) return true;
+   return false;
+}
 
 //+------------------------------------------------------------------+
 double LockInPct(const double profit)
@@ -106,7 +138,11 @@ void EvaluateAllPositions()
       if(ticket == 0) continue;
       if(PositionGetInteger(POSITION_MAGIC) != 0) continue;
 
-      const string symbol    = PositionGetString(POSITION_SYMBOL);
+      const string symbol = PositionGetString(POSITION_SYMBOL);
+
+      // Skip symbols in the exclude list
+      if(IsSkipped(symbol)) continue;
+
       const long   type      = PositionGetInteger(POSITION_TYPE);
       const double entry     = PositionGetDouble(POSITION_PRICE_OPEN);
       const double currentSL = PositionGetDouble(POSITION_SL);
@@ -144,14 +180,26 @@ int OnInit()
 {
    g_trade.LogLevel(LOG_LEVEL_ERRORS);
    g_tickCount = 0;
-   Print("DynamicProfitLock EA started — managing magic=0 positions");
+   ParseSymbolFilter();
+
+   const int skipCount = ArraySize(g_skipSymbols);
+   if(skipCount > 0)
+   {
+      string skipList = "";
+      for(int i = 0; i < skipCount; i++)
+         skipList += (i > 0 ? ", " : "") + g_skipSymbols[i];
+      PrintFormat("DPL_EA started — managing magic=0 positions, SKIPPING: %s", skipList);
+   }
+   else
+      Print("DPL_EA started — managing ALL magic=0 positions (no symbol filter)");
+
    return INIT_SUCCEEDED;
 }
 
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
 {
-   Print("DynamicProfitLock EA stopped (reason ", reason, ")");
+   Print("DPL_EA stopped (reason ", reason, ")");
 }
 
 //+------------------------------------------------------------------+
