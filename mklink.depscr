@@ -1,0 +1,11 @@
+##cmd //c 'mklink /J "C:\Users\gstar\AppData\Roaming\MetaQuotes\Terminal\53785E099C927DB68A545C249CDBCE06\MQL5\Include\InstitutionalEA" ## "D:\Repository\EA\MQL5\Include\InstitutionalEA"'
+
+## below for dynamicprofitlock
+
+# Junction for Experts
+cmd //c mklink //J "C:/Users/Srinivasan/AppData/Roaming/MetaQuotes/Terminal/53785E099C927DB68A545C249CDBCE06/MQL5/Experts/DynamicProfitLock" "D:/Repository/DynamicProfitLock/MQL5/Experts/DynamicProfitLock"
+
+# Junction for Scripts
+cmd //c mklink //J "C:/Users/Srinivasan/AppData/Roaming/MetaQuotes/Terminal/53785E099C927DB68A545C249CDBCE06/MQL5/Scripts/DynamicProfitLock" "D:/Repository/DynamicProfitLock/MQL5/Scripts/DynamicProfitLock"
+
+
