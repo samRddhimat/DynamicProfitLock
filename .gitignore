@@ -1,0 +1,14 @@
+*.ex5
+*.ex4
+MQL5/Files/
+*.log
+Thumbs.db
+.DS_Store
+*.jpg
+*.jpeg
+*.png
+*.html
+*.xml
+*.doc
+*.docx
+*.depscr
