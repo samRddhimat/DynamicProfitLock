@@ -4,35 +4,21 @@
 //| positions to lock in a percentage of unrealized profit, using     |
 //| discrete tiers that tighten as profit grows.                      |
 //|                                                                   |
-//| Tier table (agreed spec):                                         |
-//|   $0    - $50   : lock in 30% of profit                          |
-//|   $50   - $200  : lock in 50% of profit                          |
-//|   $200  - $500  : lock in 70% of profit                          |
-//|   $500  - $1000 : lock in 80% of profit                          |
-//|   $1000+        : lock in 90% of profit                          |
+//| Tier table:                                                        |
+//|   $0-$50=30%  $50-$200=50%  $200-$500=70%                        |
+//|   $500-$1000=80%  $1000+=90%                                      |
 //|                                                                   |
-//| Design:                                                           |
-//| - Attaches to ANY chart (symbol doesn't matter - it scans ALL     |
-//|   open positions across the account, not just the chart symbol).  |
-//| - Evaluates every N ticks (configurable).                         |
-//| - Only modifies SL when the new computed value is a genuine       |
-//|   improvement over the current one (never-loosen principle).      |
-//| - Does NOT touch TP. Does NOT close positions. SL management only.|
-//| - Completely independent of InstitutionalEA - different magic      |
-//|   filter (0 vs InpMagicNumber), different chart, no shared state. |
+//| Chart labels: when InpShowChartLabels=true, a label is drawn      |
+//| on the chart for each managed position showing ticket, symbol,    |
+//| direction, lock%, and current profit. Label updates each time     |
+//| the SL is tightened. Labels are removed on EA deinit.            |
 //|                                                                   |
-//| Parameters:                                                        |
-//|   InpMinProfit       : minimum unrealized profit ($) before SL    |
-//|                        is adjusted.                               |
-//|   InpCheckEveryNTicks: how often to re-evaluate (1=every tick).   |
-//|   InpLogAdjustments  : print to Experts log when SL is changed.   |
-//|   InpSymbolFilter    : comma-separated list of symbols to SKIP.   |
-//|                        "" = manage ALL symbols.                   |
-//|                        "XAUUSD" = skip XAUUSD only.              |
-//|                        "XAUUSD,USDJPY" = skip both.              |
+//| InpSymbolFilter: comma-separated symbols to SKIP.                 |
+//|   "" = manage ALL, "XAUUSD" = skip gold,                         |
+//|   "XAUUSD,USDJPY" = skip both.                                   |
 //+------------------------------------------------------------------+
 #property copyright "DynamicProfitLock EA"
-#property version   "1.01"
+#property version   "1.02"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -41,35 +27,33 @@
 input double InpMinProfit        = 1.0;    // Minimum profit ($) before SL is adjusted
 input int    InpCheckEveryNTicks = 5;      // Evaluate every N ticks (1=every tick)
 input bool   InpLogAdjustments   = true;   // Log SL changes to Experts tab
-input string InpSymbolFilter     = "";     // Symbols to SKIP (comma-separated, e.g. "XAUUSD,USDJPY")
+input string InpSymbolFilter     = "";     // Symbols to SKIP (comma-separated)
+input bool   InpShowChartLabels  = true;   // Show adjustment labels on chart
+input int    InpLabelFontSize    = 9;      // Chart label font size
+input color  InpLabelColor       = clrDodgerBlue; // Chart label color
 
 //--- state
 CTrade  g_trade;
-int     g_tickCount = 0;
-string  g_skipSymbols[];  // parsed from InpSymbolFilter
+int     g_tickCount   = 0;
+string  g_skipSymbols[];
+string  g_labelPrefix = "DPL_";  // prefix for all chart objects created by this EA
 
-//+------------------------------------------------------------------+
-//| Parse InpSymbolFilter into the g_skipSymbols array               |
 //+------------------------------------------------------------------+
 void ParseSymbolFilter()
 {
    ArrayResize(g_skipSymbols, 0);
    if(StringLen(InpSymbolFilter) == 0) return;
-
    string parts[];
    int count = StringSplit(InpSymbolFilter, ',', parts);
    ArrayResize(g_skipSymbols, count);
    for(int i = 0; i < count; i++)
    {
       g_skipSymbols[i] = parts[i];
-      // trim whitespace
       StringTrimLeft(g_skipSymbols[i]);
       StringTrimRight(g_skipSymbols[i]);
    }
 }
 
-//+------------------------------------------------------------------+
-//| Return true if this symbol should be skipped                      |
 //+------------------------------------------------------------------+
 bool IsSkipped(const string symbol)
 {
@@ -90,24 +74,15 @@ double LockInPct(const double profit)
 }
 
 //+------------------------------------------------------------------+
-double ComputeNewSL(const long   type,
-                     const double entry,
-                     const double profit,
-                     const double lockPct,
-                     const string symbol,
-                     const double volume)
+double ComputeNewSL(const long type, const double entry, const double profit,
+                     const double lockPct, const string symbol, const double volume)
 {
    const double tickSize  = SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_SIZE);
    const double tickValue = SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_VALUE);
-
    if(tickSize <= 0.0 || tickValue <= 0.0 || volume <= 0.0) return 0.0;
-
    const double dollarPerPoint = (tickValue / tickSize) * volume;
    if(dollarPerPoint <= 0.0) return 0.0;
-
-   const double protectAmount = profit * lockPct;
-   const double priceDist     = protectAmount / dollarPerPoint;
-
+   const double priceDist = (profit * lockPct) / dollarPerPoint;
    if(type == POSITION_TYPE_BUY)  return entry + priceDist;
    if(type == POSITION_TYPE_SELL) return entry - priceDist;
    return 0.0;
@@ -129,6 +104,59 @@ double NormalizePrice(const string symbol, const double price)
 }
 
 //+------------------------------------------------------------------+
+//| Draw or update a chart label for a managed position               |
+//+------------------------------------------------------------------+
+void UpdateChartLabel(const ulong ticket, const string symbol, const long type,
+                       const double profit, const double lockPct, const double newSL)
+{
+   if(!InpShowChartLabels) return;
+
+   const string name = g_labelPrefix + IntegerToString((long)ticket);
+   const string text = StringFormat("#%d %s %s | DPL:%.0f%%:$%.2f | SL:%.5f",
+                                     ticket, symbol,
+                                     type == POSITION_TYPE_BUY ? "BUY" : "SELL",
+                                     lockPct * 100.0, profit, newSL);
+
+   // Use the new SL price as the vertical anchor on the chart
+   const datetime labelTime = TimeCurrent();
+
+   if(ObjectFind(0, name) < 0)
+   {
+      // Create new label
+      ObjectCreate(0, name, OBJ_TEXT, 0, labelTime, newSL);
+   }
+   else
+   {
+      // Update existing label position
+      ObjectSetInteger(0, name, OBJPROP_TIME, labelTime);
+      ObjectSetDouble(0, name, OBJPROP_PRICE, newSL);
+   }
+
+   ObjectSetString(0, name, OBJPROP_TEXT, text);
+   ObjectSetInteger(0, name, OBJPROP_COLOR, InpLabelColor);
+   ObjectSetInteger(0, name, OBJPROP_FONTSIZE, InpLabelFontSize);
+   ObjectSetInteger(0, name, OBJPROP_ANCHOR, ANCHOR_LEFT);
+   ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, name, OBJPROP_HIDDEN, false);
+   ChartRedraw(0);
+}
+
+//+------------------------------------------------------------------+
+//| Remove all chart labels created by this EA                        |
+//+------------------------------------------------------------------+
+void RemoveAllLabels()
+{
+   const int total = ObjectsTotal(0);
+   for(int i = total - 1; i >= 0; i--)
+   {
+      const string name = ObjectName(0, i);
+      if(StringFind(name, g_labelPrefix) == 0)
+         ObjectDelete(0, name);
+   }
+   ChartRedraw(0);
+}
+
+//+------------------------------------------------------------------+
 void EvaluateAllPositions()
 {
    const int total = PositionsTotal();
@@ -139,8 +167,6 @@ void EvaluateAllPositions()
       if(PositionGetInteger(POSITION_MAGIC) != 0) continue;
 
       const string symbol = PositionGetString(POSITION_SYMBOL);
-
-      // Skip symbols in the exclude list
       if(IsSkipped(symbol)) continue;
 
       const long   type      = PositionGetInteger(POSITION_TYPE);
@@ -166,6 +192,9 @@ void EvaluateAllPositions()
                         ticket, symbol,
                         type == POSITION_TYPE_BUY ? "BUY" : "SELL",
                         profit, lockPct * 100.0, currentSL, newSL);
+
+         // Update chart label
+         UpdateChartLabel(ticket, symbol, type, profit, lockPct, newSL);
       }
       else
       {
@@ -193,13 +222,17 @@ int OnInit()
    else
       Print("DPL_EA started — managing ALL magic=0 positions (no symbol filter)");
 
+   if(InpShowChartLabels)
+      Print("DPL_EA: chart labels ENABLED");
+
    return INIT_SUCCEEDED;
 }
 
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
 {
-   Print("DPL_EA stopped (reason ", reason, ")");
+   RemoveAllLabels();
+   Print("DPL_EA stopped (reason ", reason, ") — chart labels removed");
 }
 
 //+------------------------------------------------------------------+

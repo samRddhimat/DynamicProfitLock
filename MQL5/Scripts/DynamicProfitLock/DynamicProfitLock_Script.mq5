@@ -4,23 +4,18 @@
 //| to lock in a percentage of current unrealized profit, using       |
 //| discrete tiers that tighten as profit grows.                      |
 //|                                                                   |
-//| Tier table (agreed spec):                                         |
-//|   $0    - $50   : lock in 30% of profit                          |
-//|   $50   - $200  : lock in 50% of profit                          |
-//|   $200  - $500  : lock in 70% of profit                          |
-//|   $500  - $1000 : lock in 80% of profit                          |
-//|   $1000+        : lock in 90% of profit                          |
+//| Tier table:                                                        |
+//|   $0-$50=30%  $50-$200=50%  $200-$500=70%                        |
+//|   $500-$1000=80%  $1000+=90%                                      |
 //|                                                                   |
-//| Usage: drag onto any chart. Runs once, adjusts qualifying         |
-//| positions, prints a summary, then exits.                          |
+//| Chart labels: when InpShowChartLabels=true, a label is drawn      |
+//| on the chart for each adjusted position showing ticket, symbol,   |
+//| direction, lock%, and profit at time of adjustment.               |
+//| NOTE: script labels persist after the script exits (unlike the    |
+//| EA which cleans up on deinit). Run the script again with          |
+//| InpClearLabels=true to remove all DPL labels from the chart.     |
 //|                                                                   |
-//| Parameters:                                                        |
-//|   InpMinProfit    : minimum profit ($) before SL is adjusted.    |
-//|   InpPrintDetails : print per-position detail to Experts log.    |
-//|   InpSymbolFilter : comma-separated list of symbols to SKIP.     |
-//|                     "" = manage ALL symbols.                      |
-//|                     "XAUUSD" = skip XAUUSD only.                 |
-//|                     "XAUUSD,USDJPY" = skip both.                 |
+//| InpSymbolFilter: comma-separated symbols to SKIP.                 |
 //+------------------------------------------------------------------+
 #property script_show_inputs
 #property strict
@@ -28,19 +23,23 @@
 #include <Trade/Trade.mqh>
 
 //--- inputs
-input double InpMinProfit    = 1.0;   // Minimum profit ($) before SL is adjusted
-input bool   InpPrintDetails = true;  // Print per-position detail to Experts log
-input string InpSymbolFilter = "";    // Symbols to SKIP (comma-separated, e.g. "XAUUSD,USDJPY")
+input double InpMinProfit       = 1.0;    // Minimum profit ($) before SL is adjusted
+input bool   InpPrintDetails    = true;   // Print per-position detail to Experts log
+input string InpSymbolFilter    = "";     // Symbols to SKIP (comma-separated)
+input bool   InpShowChartLabels = true;   // Show adjustment labels on chart
+input bool   InpClearLabels     = false;  // Set true to ONLY clear existing DPL labels
+input int    InpLabelFontSize   = 7;      // Chart label font size
+input color  InpLabelColor      = clrDodgerBlue; // Chart label color
 
 CTrade  g_trade;
 string  g_skipSymbols[];
+string  g_labelPrefix = "DPL_";
 
 //+------------------------------------------------------------------+
 void ParseSymbolFilter()
 {
    ArrayResize(g_skipSymbols, 0);
    if(StringLen(InpSymbolFilter) == 0) return;
-
    string parts[];
    int count = StringSplit(InpSymbolFilter, ',', parts);
    ArrayResize(g_skipSymbols, count);
@@ -72,24 +71,16 @@ double LockInPct(const double profit)
 }
 
 //+------------------------------------------------------------------+
-double ComputeNewSL(const long   type,
-                     const double entry,
-                     const double profit,
-                     const double lockPct,
-                     const string symbol)
+double ComputeNewSL(const long type, const double entry, const double profit,
+                     const double lockPct, const string symbol)
 {
    const double tickSize  = SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_SIZE);
    const double tickValue = SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_VALUE);
    const double volume    = PositionGetDouble(POSITION_VOLUME);
-
    if(tickSize <= 0.0 || tickValue <= 0.0 || volume <= 0.0) return 0.0;
-
    const double dollarPerPoint = (tickValue / tickSize) * volume;
    if(dollarPerPoint <= 0.0) return 0.0;
-
-   const double protectAmount = profit * lockPct;
-   const double priceDist     = protectAmount / dollarPerPoint;
-
+   const double priceDist = (profit * lockPct) / dollarPerPoint;
    if(type == POSITION_TYPE_BUY)  return entry + priceDist;
    if(type == POSITION_TYPE_SELL) return entry - priceDist;
    return 0.0;
@@ -111,9 +102,62 @@ double NormalizePrice(const string symbol, const double price)
 }
 
 //+------------------------------------------------------------------+
+void DrawLabel(const ulong ticket, const string symbol, const long type,
+                const double profit, const double lockPct, const double newSL)
+{
+   if(!InpShowChartLabels) return;
+
+   const string name = g_labelPrefix + IntegerToString((long)ticket);
+   const string text = StringFormat("#%d %s %s | DPL:%.0f%%:$%.2f | SL:%.5f",
+                                     ticket, symbol,
+                                     type == POSITION_TYPE_BUY ? "BUY" : "SELL",
+                                     lockPct * 100.0, profit, newSL);
+
+   if(ObjectFind(0, name) < 0)
+      ObjectCreate(0, name, OBJ_TEXT, 0, TimeCurrent(), newSL);
+   else
+   {
+      ObjectSetInteger(0, name, OBJPROP_TIME, TimeCurrent());
+      ObjectSetDouble(0, name, OBJPROP_PRICE, newSL);
+   }
+
+   ObjectSetString(0, name, OBJPROP_TEXT, text);
+   ObjectSetInteger(0, name, OBJPROP_COLOR, InpLabelColor);
+   ObjectSetInteger(0, name, OBJPROP_FONTSIZE, InpLabelFontSize);
+   ObjectSetInteger(0, name, OBJPROP_ANCHOR, ANCHOR_LEFT);
+   ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+}
+
+//+------------------------------------------------------------------+
+void ClearAllLabels()
+{
+   int removed = 0;
+   const int total = ObjectsTotal(0);
+   for(int i = total - 1; i >= 0; i--)
+   {
+      const string name = ObjectName(0, i);
+      if(StringFind(name, g_labelPrefix) == 0)
+      {
+         ObjectDelete(0, name);
+         removed++;
+      }
+   }
+   ChartRedraw(0);
+   PrintFormat("DPL Script: removed %d chart labels", removed);
+}
+
+//+------------------------------------------------------------------+
 void OnStart()
 {
    g_trade.LogLevel(LOG_LEVEL_ERRORS);
+
+   // Label-clear-only mode
+   if(InpClearLabels)
+   {
+      ClearAllLabels();
+      return;
+   }
+
    ParseSymbolFilter();
 
    int adjusted = 0;
@@ -128,9 +172,7 @@ void OnStart()
       if(ticket == 0) continue;
       if(PositionGetInteger(POSITION_MAGIC) != 0) continue;
 
-      const string symbol    = PositionGetString(POSITION_SYMBOL);
-
-      // Skip symbols in the exclude list
+      const string symbol = PositionGetString(POSITION_SYMBOL);
       if(IsSkipped(symbol))
       {
          filtered++;
@@ -165,7 +207,6 @@ void OnStart()
       }
 
       const double newSL = NormalizePrice(symbol, newSLRaw);
-
       if(!IsImprovement(type, newSL, currentSL))
       {
          skipped++;
@@ -182,6 +223,8 @@ void OnStart()
                      ticket, symbol,
                      type == POSITION_TYPE_BUY ? "BUY" : "SELL",
                      profit, lockPct * 100.0, currentSL, newSL);
+
+         DrawLabel(ticket, symbol, type, profit, lockPct, newSL);
       }
       else
       {
@@ -191,6 +234,7 @@ void OnStart()
       }
    }
 
+   ChartRedraw(0);
    PrintFormat("=== DPL Script done: %d adjusted, %d skipped, %d below min profit, %d symbol-filtered ===",
                adjusted, skipped, noProfit, filtered);
 }
